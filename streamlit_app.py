@@ -1,151 +1,97 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import requests
+import time
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# API URL for real-time data
+API_URL = "https://api.thingspeak.com/channels/1596152/feeds.json?results=50"
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Streamlit app configuration
+st.set_page_config(page_title="AQMD Dashboard", layout="wide")
+st.title("Air Quality Monitoring Dashboard")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Sidebar configuration
+refresh_rate = 30 * 60  # Set refresh rate to 30 minutes
+options = ["All", "PM2.5", "PM10", "Ozone", "Humidity", "Temperature", "CO"]
+selected_option = st.sidebar.selectbox("Select Data to Visualize", options)
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# Fetch data from API
+def fetch_data():
+    try:
+        response = requests.get(API_URL)
+        response.raise_for_status()
+        data = response.json()
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+        # Extract fields
+        feeds = data['feeds']
+        if not feeds:
+            st.error("No data available.")
+            return None
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+        # Convert to DataFrame
+        df = pd.DataFrame(feeds)
+        df['created_at'] = pd.to_datetime(df['created_at'])
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+        # Rename fields for clarity
+        df = df.rename(columns={
+            'field1': 'PM2.5',
+            'field2': 'PM10',
+            'field3': 'Ozone',
+            'field4': 'Humidity',
+            'field5': 'Temperature',
+            'field6': 'CO'
+        })
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+        # Ensure numeric data
+        for column in ['PM2.5', 'PM10', 'Ozone', 'Humidity', 'Temperature', 'CO']:
+            df[column] = pd.to_numeric(df[column], errors='coerce')
 
-    return gdp_df
+        return df
 
-gdp_df = get_gdp_data()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching data: {e}")
+        return None
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+# Live data display
+placeholder = st.empty()
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+while True:
+    data = fetch_data()
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    if data is not None:
+        with placeholder.container():
+            st.subheader("Latest Data")
+            st.dataframe(data.tail(5))
 
-# Add some spacing
-''
-''
+            st.subheader("Key Metrics")
+            col1, col2, col3 = st.columns(3)
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+            # Display average metrics (adjust as necessary)
+            col1.metric("PM2.5 (Latest)", data['PM2.5'].iloc[-1] if 'PM2.5' in data else "N/A")
+            col2.metric("Temperature (Latest)", data['Temperature'].iloc[-1] if 'Temperature' in data else "N/A")
+            col3.metric("Humidity (Latest)", data['Humidity'].iloc[-1] if 'Humidity' in data else "N/A")
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+            st.subheader("Time Series Analysis (Last 10 Hours)")
+            last_10 = data.tail(10).set_index('created_at')
 
-countries = gdp_df['Country Code'].unique()
+            if selected_option == "All":
+                st.subheader("Air Composition (Last 10 Records)")
+                latest_data = last_10[['PM2.5', 'PM10', 'Ozone', 'Humidity', 'CO']].mean(skipna=True)
+                st.plotly_chart(
+                    {
+                        "data": [
+                            {
+                                "values": latest_data.tolist(),
+                                "labels": latest_data.index.tolist(),
+                                "type": "pie"
+                            }
+                        ],
+                        "layout": {
+                            "title": "Percentage of Particles in Air"
+                        }
+                    }
+                )
+            else:
+                st.line_chart(last_10[[selected_option]])
 
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+    time.sleep(refresh_rate)
